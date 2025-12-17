@@ -1,0 +1,378 @@
+name: "Spacelift deploy"
+description: "A GitHub Action to manage Spacelift deployments using spacectl"
+author: james@james-carpenter.net
+inputs:
+  action:
+    required: true
+    description: "The action to take (e.g. run, confirm, propose)"
+  api_key_id:
+    required: true
+    description: "Spacelift API key ID"
+  api_key_secret:
+    required: true
+    description: "Spacelift API key secret"
+  commit_sha:
+    required: true
+    description: "The SHA of the commit to run against"
+  github_token:
+    required: false
+    description: "GitHub token for spacectl installation"
+  max_runs:
+    required: false
+    description: "The maximum number of runs to consider when querying the Spacelift API. If there are too many queued runs this may prevent your run being found (default: 10)"
+    default: "10"
+  organization:
+    required: true
+    description: "Spacelift organization name"
+  plan_json:
+    required: false
+    description: "Location for the JSON output of the Spacelift plan"
+    default: "tfplan.json"
+  plan_md:
+    required: false
+    description: "Location for the markdown output of the Spacelift plan"
+    default: "tfplan.md"
+  stack_id:
+    required: true
+    description: "Spacelift stack ID"
+  run_id:
+    required: false
+    description: "The ID of the Spacelift run"
+  run_metadata:
+    required: false
+    description: "A value to be included in the Spacelift run metadata"
+  timeout_minutes:
+    required: false
+    description: "How long to wait for the action to complete before timing out"
+    default: "60"
+outputs:
+  run_id:
+    description: "ID of the Spacelift run"
+    value: "${{ steps.spacelift.outputs.run_id }}"
+  run_url:
+    description: "URL of the Spacelift run"
+    value: "${{ steps.spacelift.outputs.url }}"
+  status:
+    description: "Status of the run"
+    value: "${{ steps.spacelift.outputs.status }}"
+runs:
+  using: "composite"
+  steps:
+    - name: Install spacectl
+      if: ${{ inputs.github_token != '' }}
+      uses: spacelift-io/setup-spacectl@v1.17.0
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+
+    - name: "Setup jq"
+      uses: dcarbone/install-jq-action@v3.2.0
+
+    - name: "Print required inputs"
+      if: ${{ inputs.action == '' || inputs. api_key_id == '' || inputs.api_key_secret == '' || inputs.organization == '' || inputs.stack_id == '' }}
+      shell: bash
+      run: |
+        echo "The following inputs are required: action, api_key_id, api_key_secret, organization, stack_id"
+        echo "::error::The following inputs are required: action, api_key_id, api_key_secret, organization, stack_id"
+        exit 1
+
+    - id: run
+      name: Spacelift run
+      if: ${{ inputs.action == 'run' }}
+      shell: bash
+      env:
+        PLAN_JSON: ${{ inputs.plan_json }}
+        PLAN_MD: ${{ inputs.plan_md }}
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        MAX_RUNS: ${{ inputs.max_runs }}
+        RUN_METADATA: ${{ inputs.run_metadata }}
+        SPACELIFT_API_KEY_ENDPOINT: https://${{ inputs.organization }}.app.spacelift.io
+        SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
+        SPACELIFT_API_KEY_SECRET: ${{ inputs.api_key_secret  }}
+        STACK_ID: ${{ inputs.stack_id }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+      run: |
+        TIMEOUT_SECONDS=$(( TIMEOUT_MINUTES * 60 ))
+        RUNNING_STATUSES='["QUEUED","INITIALIZING","PLANNING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
+
+        # Get the list of runs to understand the stack's state
+        echo "Fetching stack runs..."
+        STACK_RUNS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json)
+
+        # Check the number of queued runs on the stack
+        QUEUED_RUNS=$(jq '[ .[] | select(.state == "QUEUED") ]' <<< "$STACK_RUNS")
+        QUEUED_RUNS=$(jq length <<< $QUEUED_RUNS)
+
+        echo "Checking queued runs..."
+        if [ $QUEUED_RUNS -ge $MAX_RUNS ]; then
+          echo "::error::Too many queued runs on stack $STACK_ID. Max runs: $MAX_RUNS"
+          exit 1
+        fi
+
+        # Check for a queued or in-progress run for this commit
+        MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha ) ]' <<< "$STACK_RUNS")
+
+        echo "Checking for already in-progress runs..."
+        if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
+          # If there are no queued or in-progress runs, set the stack to the specified commit and start a run
+          echo "No in-progress runs found, triggering a run..."
+          spacectl stack set-current-commit --sha $COMMIT_SHA --id $STACK_ID
+          if [[ "$RUN_METADATA" == '' ]]; then
+            spacectl stack deploy --id $STACK_ID
+          else
+            spacectl stack deploy --id $STACK_ID --run-metadata "$RUN_METADATA"
+          fi
+        else
+          echo "In-progress run found"
+        fi
+
+        RUN_ID=""
+        RUN_STATUS=""
+        START_TIME=$EPOCHSECONDS
+
+        echo "Waiting for TF plan to complete..."
+        while [[ "$RUN_ID" == "" ]]; do
+
+          # Look for matching runs on this stack
+          STACK_RUNS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json)
+          MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha ) ]' <<< "$STACK_RUNS")
+          UNCONFIRMED_RUN_ID=$(jq -r '.[] | select( .state == "UNCONFIRMED" ) | .id' <<< "$MATCHING_RUNS")
+          APPLYING_RUN_ID=$(jq -r '.[] | select( .state == "APPLYING" ) | .id' <<< "$MATCHING_RUNS")
+
+          # If there are no in-progress runs matching this commit, fail
+          if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
+            echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
+            exit 1
+          # If there is an unconfirmed run, set the run status and ID
+          elif [ -n "$UNCONFIRMED_RUN_ID" ]; then
+            echo "Plan ready"
+            RUN_STATUS="UNCONFIRMED"
+            RUN_ID=$UNCONFIRMED_RUN_ID
+            echo "id=$RUN_ID" >> $GITHUB_OUTPUT
+          # If there is an already applying run, set the run status and ID
+          elif [ -n "$APPLYING_RUN_ID" ]; then
+            echo "Run is applying"
+            RUN_STATUS="APPLYING"
+            RUN_ID=$APPLYING_RUN_ID
+            echo "id=$RUN_ID" >> $GITHUB_OUTPUT
+          else
+            RUN_STATUS=$(jq -r '.[0].state' <<< "$MATCHING_RUNS")
+          fi
+
+          echo "status=$RUN_STATUS" >> $GITHUB_OUTPUT
+
+          # If we exceed the timeout, fail
+          if (( EPOCHSECONDS - START_TIME > $TIMEOUT_SECONDS )); then
+            echo "::error::Timed out waiting for plan"
+            exit 1
+          fi
+        done
+
+        if [[ "$RUN_STATUS" == "UNCONFIRMED" ]]; then
+
+          echo "Outputting changes..."
+          RUN_URL="$SPACELIFT_API_KEY_ENDPOINT/stack/$STACK_ID/run/$RUN_ID"
+          echo "url=$RUN_URL" >> $GITHUB_OUTPUT
+
+          # If there's an unconfirmed run, get the changes and output them as markdown
+          spacectl stack changes --id $STACK_ID --run $RUN_ID > $PLAN_JSON
+
+          ${{ github.action_path }}/spacectl_json2md.sh $PLAN_JSON $PLAN_MD $RUN_URL
+
+          echo "$(cat $PLAN_MD)" >> $GITHUB_STEP_SUMMARY
+
+        fi
+
+    - id: confirm
+      name: Spacelift confirm
+      if: ${{ inputs.action == 'confirm' }}
+      shell: bash
+      env:
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        MAX_RUNS: ${{ inputs.max_runs }}
+        RUN_ID: ${{ inputs.run_id }}
+        RUN_METADATA: ${{ inputs.run_metadata }}
+        SPACELIFT_API_KEY_ENDPOINT: https://${{ inputs.organization }}.app.spacelift.io
+        SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
+        SPACELIFT_API_KEY_SECRET: ${{ inputs.api_key_secret  }}
+        STACK_ID: ${{ inputs.stack_id }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+      run: |
+        TIMEOUT_SECONDS=$(( TIMEOUT_MINUTES * 60 ))
+        RUNNING_STATUSES='["INITIALIZING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
+
+        # Get the list of runs to understand the stack's state
+        echo "Fetching stack runs..."
+        STACK_RUNS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json)
+
+        # Check the number of queued runs on the stack
+        echo "Checking queued runs..."
+        QUEUED_RUNS=$(jq '[ .[] | select(.state == "QUEUED") ]' <<< "$STACK_RUNS")
+        QUEUED_RUNS=$(jq length <<< $QUEUED_RUNS)
+
+        if [ $QUEUED_RUNS -ge $MAX_RUNS ]; then
+          echo "::error::Too many queued runs on stack $STACK_ID. Max runs: $MAX_RUNS"
+          exit 1
+        fi
+
+        # Check for an in-progress run matching this ID and commit
+        if [[ "$RUN_ID" == "" ]]; then
+          echo "Checking for already in-progress runs..."
+          MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha ) ]' <<< "$STACK_RUNS")
+        else
+          MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --arg run_id "$RUN_ID" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha and .id == $run_id ) ]' <<< "$STACK_RUNS")
+        fi
+
+        UNCONFIRMED_RUN_ID=$(jq -r '.[] | select( .state == "UNCONFIRMED" ) | .id' <<< "$MATCHING_RUNS")
+        APPLYING_RUN_ID=$(jq -r '.[] | select( .state == "APPLYING" ) | .id' <<< "$MATCHING_RUNS")
+
+        # If there are no in-progress runs matching this commit, fail
+        if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
+          echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
+          exit 1
+        elif [ -n "$UNCONFIRMED_RUN_ID" ]; then
+          echo "Unconfirmed run found, confirming..."
+          RUN_ID=$UNCONFIRMED_RUN_ID
+
+          # If there is an unconfirmed run matching the run ID and commit SHA, confirm it and tail the output
+          if [[ "$RUN_METADATA" == '' ]]; then
+            spacectl stack confirm --run $UNCONFIRMED_RUN_ID --tail
+          else
+            spacectl stack confirm --run $UNCONFIRMED_RUN_ID --run-metadata "$RUN_METADATA" --tail
+          fi
+        elif [ -n "$APPLYING_RUN_ID" ]; then
+          echo "In-progress run found, waiting for apply..."
+          RUN_ID=$APPLYING_RUN_ID
+
+          # If the run is already applying, notify and continue
+          RUN_URL="$SPACELIFT_API_KEY_ENDPOINT/stack/$STACK_ID/run/$RUN_ID"
+          echo "For live log output visit $RUN_URL"
+
+          RUN_STATUS="APPLYING"
+          START_TIME=$EPOCHSECONDS
+
+          while [[ "$RUN_STATUS" == "APPLYING" ]]; do
+
+            # Get the status of the run
+            RUN_STATUS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json | jq -r --arg run_id "$RUN_ID" '.[] | select( .id == $run_id ) | .state')
+            echo "status=$RUN_STATUS" >> $GITHUB_OUTPUT
+
+            # If there are no in-progress runs matching this commit, fail
+            if [ -z "$RUN_STATUS" ]; then
+              echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
+              exit 1
+            fi
+
+            # If we exceed the timeout, fail
+            if (( EPOCHSECONDS - START_TIME > $TIMEOUT_SECONDS )); then
+              echo "::error::Timed out waiting for apply"
+              exit 1
+            fi
+          done
+        fi
+
+        echo "Run complete, fetching final status..."
+        # Get the final status of the run
+        RUN_STATUS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json | jq -r --arg run_id "$RUN_ID" '.[] | select( .id == $run_id ) | .state')
+        echo "status=$RUN_STATUS" >> $GITHUB_OUTPUT
+
+        RUN_URL="$SPACELIFT_API_KEY_ENDPOINT/stack/$STACK_ID/run/$RUN_ID"
+        echo "url=$RUN_URL" >> $GITHUB_OUTPUT
+
+        case "$RUN_STATUS" in
+          "CANCELED"|"FAILED"|"DISCARDED"|"STOPPED")
+            echo "::error::Run failed, for more details visit $RUN_URL"
+            exit 1
+            ;;
+          "SKIPPED")
+            echo "Run skipped, for more detail visit $RUN_URL"
+            ;;
+          "FINISHED")
+            echo "Run finished successfully, for more detail visit $RUN_URL"
+            ;;
+        esac
+
+    - id: propose
+      name: Spacelift plan
+      if: ${{ inputs.action == 'propose' }}
+      shell: bash
+      env:
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        PLAN_JSON: ${{ inputs.plan_json }}
+        PLAN_MD: ${{ inputs.plan_md }}
+        SPACELIFT_API_KEY_ENDPOINT: https://${{ inputs.organization }}.app.spacelift.io
+        SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
+        SPACELIFT_API_KEY_SECRET: ${{ inputs.api_key_secret  }}
+        STACK_ID: ${{ inputs.stack_id }}
+      run: |
+        # Kick off a Spacelift plan
+        spacectl stack preview --id $STACK_ID --sha $COMMIT_SHA --tail
+
+        # Get some details about the run
+        RUN=$(spacectl stack run list --id $STACK_ID --preview-runs -o json | jq -r --arg commit "$COMMIT_SHA" '[.[] | select(.commit.hash == $commit)]')
+        RUN_ID=$(jq -r '.[0].id' <<< "$RUN")
+        STATE=$(jq -r '.[0].state' <<< "$RUN")
+
+        echo "status=$STATE" >> $GITHUB_OUTPUT
+
+        RUN_URL="$SPACELIFT_API_KEY_ENDPOINT/stack/$STACK_ID/run/$RUN_ID"
+        echo "url=$RUN_URL" >> $GITHUB_OUTPUT
+        echo "id=$RUN_ID" >> $GITHUB_OUTPUT
+
+        if [ "$STATE" = "FAILED" ]; then
+          echo "::error::Run failed, for more details visit $RUN_URL"
+          exit 1
+        fi
+
+        # Output the propoosed changes
+        spacectl stack changes --id $STACK_ID --run $RUN_ID > $PLAN_JSON
+
+        ${{ github.action_path }}/spacectl_json2md.sh $PLAN_JSON $PLAN_MD $RUN_URL
+
+        echo "$(cat $PLAN_MD)" >> $GITHUB_STEP_SUMMARY
+
+    - id: abort
+      name: Spacelift plan
+      if: ${{ inputs.action == 'abort' }}
+      shell: bash
+      env:
+        COMMIT_SHA: ${{ inputs.commit_sha }}
+        RUN_ID: ${{ inputs.run_id }}
+        SPACELIFT_API_KEY_ENDPOINT: https://${{ inputs.organization }}.app.spacelift.io
+        SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
+        SPACELIFT_API_KEY_SECRET: ${{ inputs.api_key_secret  }}
+        STACK_ID: ${{ inputs.stack_id }}
+      run: |
+        # Abort a Spacelift plan
+        RUNNING_STATUSES='["INITIALIZING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
+        if [[ "$RUN_ID" == '' ]]; then
+          MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha ) ]' <<< "$STACK_RUNS")
+
+          if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
+            echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
+            exit 1
+          else
+            RUN_ID=$(jq -r '.[0].id' <<< $MATCHING_RUNS)
+          fi
+        fi
+
+        spacectl stack discard --run $RUN_ID --tail
+
+    - id: outputs
+      name: Output
+      if: always()
+      shell: bash
+      env:
+        ACTION: ${{ inputs.action }}
+      run: |
+        if [[ "$ACTION" == "run" ]]; then
+          echo "status=${{ steps.run.outputs.status }}" >> $GITHUB_OUTPUT
+          echo "run_url=${{ steps.run.outputs.url }}" >> $GITHUB_OUTPUT
+          echo "run_id=${{ steps.run.outputs.id }}" >> $GITHUB_OUTPUT
+        elif [[ "$ACTION" == "confirm" ]]; then
+          echo "status=${{ steps.confirm.outputs.status }}" >> $GITHUB_OUTPUT
+          echo "run_url=${{ steps.confirm.outputs.url }}" >> $GITHUB_OUTPUT
+        elif [[ "$ACTION" == "propose" ]]; then
+          echo "status=${{ steps.propose.outputs.status }}" >> $GITHUB_OUTPUT
+          echo "run_url=${{ steps.propose.outputs.url }}" >> $GITHUB_OUTPUT
+          echo "run_id=${{ steps.propose.outputs.id }}" >> $GITHUB_OUTPUT
+        fi
