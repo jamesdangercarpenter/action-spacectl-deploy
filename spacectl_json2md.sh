@@ -64,4 +64,5 @@ if [ -n "$RUN_URL" ]; then
 fi
 
 echo "</details>" >>"$OUTPUT_FILE"
+echo "" >>"$OUTPUT_FILE"
 echo "✅ Markdown plan saved to $OUTPUT_FILE"
