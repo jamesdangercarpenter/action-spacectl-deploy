@@ -336,6 +336,7 @@ runs:
       shell: bash
       env:
         COMMIT_SHA: ${{ inputs.commit_sha }}
+        MAX_RUNS: ${{ inputs.max_runs }}
         RUN_ID: ${{ inputs.run_id }}
         SPACELIFT_API_KEY_ENDPOINT: https://${{ inputs.organization }}.app.spacelift.io
         SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
@@ -345,6 +346,7 @@ runs:
         # Abort a Spacelift plan
         RUNNING_STATUSES='["INITIALIZING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
         if [[ "$RUN_ID" == '' ]]; then
+          STACK_RUNS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json)
           MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha ) ]' <<< "$STACK_RUNS")
 
           if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
