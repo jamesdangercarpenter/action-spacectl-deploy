@@ -344,7 +344,7 @@ runs:
         STACK_ID: ${{ inputs.stack_id }}
       run: |
         # Abort a Spacelift plan
-        RUNNING_STATUSES='["INITIALIZING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
+        RUNNING_STATUSES='["QUEUED","INITIALIZING","PLANNING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
         if [[ "$RUN_ID" == '' ]]; then
           STACK_RUNS=$(spacectl stack run list --id $STACK_ID --max-results $MAX_RUNS -o json)
           MATCHING_RUNS=$(jq --arg commit_sha "$COMMIT_SHA" --argjson match "$RUNNING_STATUSES" '[ .[] | select( ( .state | IN ($match[]) ) and .commit.hash == $commit_sha ) ]' <<< "$STACK_RUNS")
