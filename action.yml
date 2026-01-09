@@ -357,7 +357,7 @@ runs:
           fi
         fi
 
-        spacectl stack discard --run $RUN_ID --tail
+        spacectl stack discard --run $RUN_ID
 
     - id: outputs
       name: Output
