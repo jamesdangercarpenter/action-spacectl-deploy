@@ -11,6 +11,10 @@ inputs:
   api_key_secret:
     required: true
     description: "Spacelift API key secret"
+  blocking_statuses:
+    required: false
+    description: "Stack statuses which are considered blocking"
+    default: '["INITIALIZING","PLANNING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
   commit_sha:
     required: true
     description: "The SHA of the commit to run against"
@@ -93,12 +97,12 @@ runs:
         SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
         SPACELIFT_API_KEY_SECRET: ${{ inputs.api_key_secret  }}
         STACK_BLOCKED_BEHAVIOUR: ${{ inputs.stack_blocked_behaviour }}
+        BLOCKING_STATUSES: ${{ inputs.blocking_statuses }}
         STACK_ID: ${{ inputs.stack_id }}
         TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
       run: |
         TIMEOUT_SECONDS=$(( TIMEOUT_MINUTES * 60 ))
         RUNNING_STATUSES='["QUEUED","INITIALIZING","PLANNING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
-        BLOCKING_STATUSES='["INITIALIZING","PLANNING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
 
         # Get the list of runs to understand the stack's state
         echo "Fetching stack runs..."
