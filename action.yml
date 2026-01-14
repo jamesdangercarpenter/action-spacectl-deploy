@@ -141,6 +141,8 @@ runs:
           case "$STACK_BLOCKED_BEHAVIOUR" in
             "fail")
               exit 1
+              ;;
+          esac
         fi
 
         echo "Checking for already in-progress runs..."
@@ -184,6 +186,8 @@ runs:
             case "$STACK_BLOCKED_BEHAVIOUR" in
               "fail")
                 exit 1
+                ;;
+            esac
           # If there is an unconfirmed run, set the run status and ID
           elif [ -n "$UNCONFIRMED_RUN_ID" ]; then
             echo "Plan ready"
