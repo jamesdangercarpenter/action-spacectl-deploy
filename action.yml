@@ -36,6 +36,10 @@ inputs:
     required: false
     description: "Location for the markdown output of the Spacelift plan"
     default: "tfplan.md"
+  plan_slack:
+    required: false
+    description: "Location for the Slack output of the Spacelift plan"
+    default: "tfplan.slack"
   stack_id:
     required: true
     description: "Spacelift stack ID"
@@ -99,6 +103,7 @@ runs:
       env:
         PLAN_JSON: ${{ inputs.plan_json }}
         PLAN_MD: ${{ inputs.plan_md }}
+        PLAN_SLACK: ${{ inputs.plan_slack }}
         COMMIT_SHA: ${{ inputs.commit_sha }}
         MAX_RUNS: ${{ inputs.max_runs }}
         RUN_METADATA: ${{ inputs.run_metadata }}
@@ -234,6 +239,7 @@ runs:
           spacectl stack changes --id $STACK_ID --run $RUN_ID > $PLAN_JSON
 
           ${{ github.action_path }}/spacectl_json2md.sh $PLAN_JSON $PLAN_MD $RUN_URL
+          ${{ github.action_path }}/spacectl_json2slack.sh $PLAN_JSON $PLAN_SLACK $RUN_URL $STACK_ID
 
           echo "$(cat $PLAN_MD)" >> $GITHUB_STEP_SUMMARY
 
@@ -356,6 +362,7 @@ runs:
         COMMIT_SHA: ${{ inputs.commit_sha }}
         PLAN_JSON: ${{ inputs.plan_json }}
         PLAN_MD: ${{ inputs.plan_md }}
+        PLAN_SLACK: ${{ inputs.plan_slack }}
         SPACELIFT_API_KEY_ENDPOINT: https://${{ inputs.organization }}.app.spacelift.io
         SPACELIFT_API_KEY_ID: ${{ inputs.api_key_id  }}
         SPACELIFT_API_KEY_SECRET: ${{ inputs.api_key_secret  }}
@@ -384,6 +391,7 @@ runs:
         spacectl stack changes --id $STACK_ID --run $RUN_ID > $PLAN_JSON
 
         ${{ github.action_path }}/spacectl_json2md.sh $PLAN_JSON $PLAN_MD $RUN_URL
+        ${{ github.action_path }}/spacectl_json2slack.sh $PLAN_JSON $PLAN_SLACK $RUN_URL $STACK_ID
 
         echo "$(cat $PLAN_MD)" >> $GITHUB_STEP_SUMMARY
 
