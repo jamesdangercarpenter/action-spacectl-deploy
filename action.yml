@@ -45,6 +45,9 @@ inputs:
   run_metadata:
     required: false
     description: "A value to be included in the Spacelift run metadata"
+  runtime_config_file:
+    required: false
+    description: "Config file to pass to the run"
   stack_blocked_behaviour:
     required: false
     description: "Action to take if another run is blocking the stack (wait, fail)"
@@ -111,6 +114,14 @@ runs:
         RUNNING_STATUSES='["QUEUED","INITIALIZING","PLANNING","APPLYING","PREPARING","PREPARING_APPLY","READY","UNCONFIRMED"]'
         RUN_ID=""
         RUN_STATUS=""
+        RUNTIME_CONFIG_ARGS=""
+
+        # Generate runtime config file if deploy info is provided
+        if [[ -n "${{ inputs.runtime_config_file }}" ]]; then
+          RUNTIME_CONFIG_ARGS="--runtime-config ${{ inputs.runtime_config_file }}"
+          echo "Using runtime config:"
+          cat "$RUNTIME_CONFIG_FILE"
+        fi
 
         # Get the list of runs to understand the stack's state
         echo "Fetching stack runs..."
@@ -151,9 +162,9 @@ runs:
           echo "No in-progress runs found, triggering a run..."
           spacectl stack set-current-commit --sha $COMMIT_SHA --id $STACK_ID
           if [[ "$RUN_METADATA" == '' ]]; then
-            spacectl stack deploy --id $STACK_ID
+            spacectl stack deploy --id $STACK_ID $RUNTIME_CONFIG_ARGS
           else
-            spacectl stack deploy --id $STACK_ID --run-metadata "$RUN_METADATA"
+            spacectl stack deploy --id $STACK_ID --run-metadata "$RUN_METADATA" $RUNTIME_CONFIG_ARGS
           fi
         else
           echo "In-progress run found"
