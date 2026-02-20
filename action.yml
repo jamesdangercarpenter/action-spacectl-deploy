@@ -125,7 +125,7 @@ runs:
         if [[ -n "${{ inputs.runtime_config_file }}" ]]; then
           RUNTIME_CONFIG_ARGS="--runtime-config ${{ inputs.runtime_config_file }}"
           echo "Using runtime config:"
-          cat "$RUNTIME_CONFIG_FILE"
+          cat "${{ inputs.runtime_config_file }}"
         fi
 
         # Get the list of runs to understand the stack's state
