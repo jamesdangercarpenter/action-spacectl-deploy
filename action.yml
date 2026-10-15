@@ -120,6 +120,7 @@ runs:
         RUN_ID=""
         RUN_STATUS=""
         RUNTIME_CONFIG_ARGS=""
+        TRIGGERED_RUN_ID=""
 
         # Generate runtime config file if deploy info is provided
         if [[ -n "${{ inputs.runtime_config_file }}" ]]; then
@@ -167,10 +168,14 @@ runs:
           echo "No in-progress runs found, triggering a run..."
           spacectl stack set-current-commit --sha $COMMIT_SHA --id $STACK_ID
           if [[ "$RUN_METADATA" == '' ]]; then
-            spacectl stack deploy --id $STACK_ID $RUNTIME_CONFIG_ARGS
+            DEPLOY_OUTPUT=$(spacectl stack deploy --id $STACK_ID $RUNTIME_CONFIG_ARGS)
           else
-            spacectl stack deploy --id $STACK_ID --run-metadata "$RUN_METADATA" $RUNTIME_CONFIG_ARGS
+            DEPLOY_OUTPUT=$(spacectl stack deploy --id $STACK_ID --run-metadata "$RUN_METADATA" $RUNTIME_CONFIG_ARGS)
           fi
+          echo "$DEPLOY_OUTPUT"
+
+          # Remember the triggered run so we can find it again if it finishes without needing confirmation
+          TRIGGERED_RUN_ID=$(grep -oE '/run/[A-Za-z0-9]+' <<< "$DEPLOY_OUTPUT" | head -n1 | cut -d/ -f3 || true)
         else
           echo "In-progress run found"
         fi
@@ -187,10 +192,26 @@ runs:
           UNCONFIRMED_RUN_ID=$(jq -r '.[] | select( .state == "UNCONFIRMED" ) | .id' <<< "$MATCHING_RUNS")
           APPLYING_RUN_ID=$(jq -r '.[] | select( .state == "APPLYING" ) | .id' <<< "$MATCHING_RUNS")
 
-          # If there are no in-progress runs matching this commit, fail
+          # If there are no in-progress runs matching this commit, check whether the run finished without
+          # needing confirmation (e.g. there were no changes to apply), otherwise fail
           if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
-            echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
-            exit 1
+            if [[ -n "$TRIGGERED_RUN_ID" ]]; then
+              LATEST_RUN=$(jq --arg run_id "$TRIGGERED_RUN_ID" '[ .[] | select( .id == $run_id ) ][0]' <<< "$STACK_RUNS")
+            else
+              LATEST_RUN=$(jq --arg commit_sha "$COMMIT_SHA" '[ .[] | select( .commit.hash == $commit_sha ) ][0]' <<< "$STACK_RUNS")
+            fi
+            LATEST_RUN_STATUS=$(jq -r '.state // empty' <<< "$LATEST_RUN")
+
+            if [[ "$LATEST_RUN_STATUS" != "FINISHED" ]]; then
+              echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID${LATEST_RUN_STATUS:+ (latest run state: $LATEST_RUN_STATUS)}"
+              exit 1
+            fi
+
+            echo "Run finished without needing confirmation, no changes to apply"
+            RUN_STATUS="FINISHED"
+            RUN_ID=$(jq -r '.id' <<< "$LATEST_RUN")
+            echo "id=$RUN_ID" >> $GITHUB_OUTPUT
+            echo "url=$SPACELIFT_API_KEY_ENDPOINT/stack/$STACK_ID/run/$RUN_ID" >> $GITHUB_OUTPUT
           # If there is a blocking run, take the action specified
           elif [ $(jq length  <<< "$BLOCKING_RUNS") -ne 0 ]; then
             echo "Another run is blocking the stack!"
@@ -288,10 +309,22 @@ runs:
         UNCONFIRMED_RUN_ID=$(jq -r '.[] | select( .state == "UNCONFIRMED" ) | .id' <<< "$MATCHING_RUNS")
         APPLYING_RUN_ID=$(jq -r '.[] | select( .state == "APPLYING" ) | .id' <<< "$MATCHING_RUNS")
 
-        # If there are no in-progress runs matching this commit, fail
+        # If there are no in-progress runs matching this commit, check whether the run already finished
+        # without needing confirmation (e.g. there were no changes to apply), otherwise fail
         if [ $(jq length  <<< "$MATCHING_RUNS") -eq 0 ]; then
-          echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
-          exit 1
+          if [[ "$RUN_ID" == "" ]]; then
+            FINISHED_RUN_ID=$(jq -r --arg commit_sha "$COMMIT_SHA" '[ .[] | select( .commit.hash == $commit_sha ) ][0] | select( .state == "FINISHED" ) | .id' <<< "$STACK_RUNS")
+          else
+            FINISHED_RUN_ID=$(jq -r --arg commit_sha "$COMMIT_SHA" --arg run_id "$RUN_ID" '.[] | select( .id == $run_id and .commit.hash == $commit_sha and .state == "FINISHED" ) | .id' <<< "$STACK_RUNS")
+          fi
+
+          if [[ -z "$FINISHED_RUN_ID" ]]; then
+            echo "::error::No in-progress runs found for $COMMIT_SHA on $STACK_ID"
+            exit 1
+          fi
+
+          echo "Run already finished, nothing to confirm"
+          RUN_ID=$FINISHED_RUN_ID
         elif [ -n "$UNCONFIRMED_RUN_ID" ]; then
           echo "Unconfirmed run found, confirming..."
           RUN_ID=$UNCONFIRMED_RUN_ID
