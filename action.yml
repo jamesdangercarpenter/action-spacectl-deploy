@@ -66,7 +66,7 @@ outputs:
     value: "${{ steps.set_outputs.outputs.run_id }}"
   run_url:
     description: "URL of the Spacelift run"
-    value: "${{ steps.set_outputs.outputs.url }}"
+    value: "${{ steps.set_outputs.outputs.run_url }}"
   blocking_run_id:
     description: "ID of the Spacelift run which is currently blocking the stack"
     value: "${{ steps.set_outputs.outputs.blocking_run_id }}"
